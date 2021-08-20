@@ -270,21 +270,13 @@ bool CHC::visit(FunctionDefinition const& _function)
 	auto bodyBlock = createBlock(&m_currentFunction->body(), PredicateType::FunctionBlock);
 
 	auto functionPred = predicate(*functionEntryBlock);
+	auto bodyPred = predicate(*bodyBlock);
 
 	addRule(functionPred, functionPred.name);
 
 	solAssert(m_currentContract, "");
 	m_context.addAssertion(initialConstraints(*m_currentContract, &_function));
 
-	// The contract may have received funds through a selfdestruct or
-	// block.coinbase, which do not trigger calls into the contract.
-	// So the only constraint we can add here is that the balance of
-	// the contract grows by at least `msg.value`.
-	SymbolicIntVariable k{TypeProvider::uint256(), TypeProvider::uint256(), "funds_" + to_string(m_context.newUniqueId()), m_context};
-	state().addBalance(state().thisAddress(), k.currentValue());
-	m_context.addAssertion(k.currentValue() >= state().txMember("msg.value"));
-
-	auto bodyPred = predicate(*bodyBlock);
 	connectBlocks(functionPred, bodyPred);
 
 	setCurrentBlock(*bodyBlock);
@@ -329,11 +321,16 @@ void CHC::endVisit(FunctionDefinition const& _function)
 		shouldAnalyze(*m_currentContract)
 	)
 	{
-		auto sum = summary(_function);
+		defineExternalFunctionInterface(_function, *m_currentContract);
+		setCurrentBlock(*m_interfaces.at(m_currentContract));
+
+		// Create the rule
+		// interface \land externalFunctionEntry => interface'
 		auto ifacePre = smt::interfacePre(*m_interfaces.at(m_currentContract), *m_currentContract, m_context);
-		auto txConstraints = state().txTypeConstraints() && state().txFunctionConstraints(_function);
-		m_queryPlaceholders[&_function].push_back({txConstraints && sum, errorFlag().currentValue(), ifacePre});
-		connectBlocks(ifacePre, interface(), txConstraints && sum && errorFlag().currentValue() == 0);
+		auto sum = externalSummary(_function);
+
+		m_queryPlaceholders[&_function].push_back({sum, errorFlag().currentValue(), ifacePre});
+		connectBlocks(ifacePre, interface(), sum && errorFlag().currentValue() == 0);
 	}
 
 	m_currentFunction = nullptr;
@@ -963,6 +960,7 @@ void CHC::resetSourceAnalysis()
 	m_queryPlaceholders.clear();
 	m_callGraph.clear();
 	m_summaries.clear();
+	m_externalSummaries.clear();
 	m_interfaces.clear();
 	m_nondetInterfaces.clear();
 	m_constructorSummaries.clear();
@@ -1141,6 +1139,8 @@ void CHC::defineInterfacesAndSummaries(SourceUnit const& _source)
 
 				if (!function->isConstructor() && function->isPublic() && resolved.count(function))
 				{
+					m_externalSummaries[contract].emplace(function, createSummaryBlock(*function, *contract));
+
 					auto state1 = stateVariablesAtIndex(1, *contract);
 					auto state2 = stateVariablesAtIndex(2, *contract);
 
@@ -1157,10 +1157,39 @@ void CHC::defineInterfacesAndSummaries(SourceUnit const& _source)
 						applyMap(function->parameters(), [this](auto _var) { return valueAtIndex(*_var, 1); }) +
 						applyMap(function->returnParameters(), [this](auto _var) { return valueAtIndex(*_var, 1); });
 
-					connectBlocks(nondetPre, nondetPost, errorPre == 0 && (*m_summaries.at(contract).at(function))(args));
+					connectBlocks(nondetPre, nondetPost, errorPre == 0 && (*m_externalSummaries.at(contract).at(function))(args));
 				}
 			}
 		}
+}
+
+void CHC::defineExternalFunctionInterface(FunctionDefinition const& _function, ContractDefinition const& _contract)
+{
+	// Create a rule that represents an external call to this function.
+	// This contains more things than the function body itself,
+	// such as balance updates because of ``msg.value``.
+	auto functionEntryBlock = createBlock(&_function, PredicateType::FunctionBlock);
+	auto functionPred = predicate(*functionEntryBlock);
+	addRule(functionPred, functionPred.name);
+	setCurrentBlock(*functionEntryBlock);
+
+	m_context.addAssertion(initialConstraints(_contract, &_function));
+	m_context.addAssertion(state().txTypeConstraints() && state().txFunctionConstraints(_function));
+
+	// The contract may have received funds through a selfdestruct or
+	// block.coinbase, which do not trigger calls into the contract.
+	// So the only constraint we can add here is that the balance of
+	// the contract grows by at least `msg.value`.
+	SymbolicIntVariable k{TypeProvider::uint256(), TypeProvider::uint256(), "funds_" + to_string(m_context.newUniqueId()), m_context};
+	m_context.addAssertion(k.currentValue() >= state().txMember("msg.value"));
+	// Assume that address(this).balance cannot overflow.
+	m_context.addAssertion(smt::symbolicUnknownConstraints(state().balance(state().thisAddress()) + k.currentValue(), TypeProvider::uint256()));
+	state().addBalance(state().thisAddress(), k.currentValue());
+
+	errorFlag().increaseIndex();
+	m_context.addAssertion(summaryCall(_function));
+
+	connectBlocks(functionPred, externalSummary(_function));
 }
 
 void CHC::defineContractInitializer(ContractDefinition const& _contract, ContractDefinition const& _contextContract)
@@ -1233,10 +1262,32 @@ smtutil::Expression CHC::summary(FunctionDefinition const& _function, ContractDe
 	return smt::function(*m_summaries.at(&_contract).at(&_function), &_contract, m_context);
 }
 
+smtutil::Expression CHC::summaryCall(FunctionDefinition const& _function, ContractDefinition const& _contract)
+{
+	return smt::functionCall(*m_summaries.at(&_contract).at(&_function), &_contract, m_context);
+}
+
+smtutil::Expression CHC::externalSummary(FunctionDefinition const& _function, ContractDefinition const& _contract)
+{
+	return smt::function(*m_externalSummaries.at(&_contract).at(&_function), &_contract, m_context);
+}
+
 smtutil::Expression CHC::summary(FunctionDefinition const& _function)
 {
 	solAssert(m_currentContract, "");
 	return summary(_function, *m_currentContract);
+}
+
+smtutil::Expression CHC::summaryCall(FunctionDefinition const& _function)
+{
+	solAssert(m_currentContract, "");
+	return summaryCall(_function, *m_currentContract);
+}
+
+smtutil::Expression CHC::externalSummary(FunctionDefinition const& _function)
+{
+	solAssert(m_currentContract, "");
+	return externalSummary(_function, *m_currentContract);
 }
 
 Predicate const* CHC::createBlock(ASTNode const* _node, PredicateType _predType, string const& _prefix)
