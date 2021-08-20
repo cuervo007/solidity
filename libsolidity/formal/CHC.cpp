@@ -169,7 +169,13 @@ void CHC::endVisit(ContractDefinition const& _contract)
 	smtutil::Expression zeroes(true);
 	for (auto var: stateVariablesIncludingInheritedAndPrivate(_contract))
 		zeroes = zeroes && currentValue(*var) == smt::zeroValue(var->type());
-	addRule(smtutil::Expression::implies(initialConstraints(_contract) && zeroes, predicate(entry)), entry.functor().name);
+	// The contract's address might already have funds before deployment,
+	// so the balance must be at least `msg.value`, but not equals.
+	auto initialBalance = state().balance(state().thisAddress()) >= state().txMember("msg.value");
+	addRule(smtutil::Expression::implies(
+		initialConstraints(_contract) && zeroes && initialBalance,
+		predicate(entry)
+	), entry.functor().name);
 	setCurrentBlock(entry);
 
 	solAssert(!m_errorDest, "");
@@ -264,13 +270,21 @@ bool CHC::visit(FunctionDefinition const& _function)
 	auto bodyBlock = createBlock(&m_currentFunction->body(), PredicateType::FunctionBlock);
 
 	auto functionPred = predicate(*functionEntryBlock);
-	auto bodyPred = predicate(*bodyBlock);
 
 	addRule(functionPred, functionPred.name);
 
 	solAssert(m_currentContract, "");
 	m_context.addAssertion(initialConstraints(*m_currentContract, &_function));
 
+	// The contract may have received funds through a selfdestruct or
+	// block.coinbase, which do not trigger calls into the contract.
+	// So the only constraint we can add here is that the balance of
+	// the contract grows by at least `msg.value`.
+	SymbolicIntVariable k{TypeProvider::uint256(), TypeProvider::uint256(), "funds_" + to_string(m_context.newUniqueId()), m_context};
+	state().addBalance(state().thisAddress(), k.currentValue());
+	m_context.addAssertion(k.currentValue() >= state().txMember("msg.value"));
+
+	auto bodyPred = predicate(*bodyBlock);
 	connectBlocks(functionPred, bodyPred);
 
 	setCurrentBlock(*bodyBlock);

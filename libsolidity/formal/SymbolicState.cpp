@@ -121,6 +121,16 @@ void SymbolicState::transfer(smtutil::Expression _from, smtutil::Expression _to,
 	m_context.addAssertion(m_state.value() == newState);
 }
 
+void SymbolicState::addBalance(smtutil::Expression _address, smtutil::Expression _value)
+{
+	auto newBalances = smtutil::Expression::store(
+		balances(),
+		_address,
+		balance(_address) + move(_value)
+	);
+	m_state.assignMember("balances", newBalances);
+}
+
 smtutil::Expression SymbolicState::txMember(string const& _member) const
 {
 	return m_tx.member(_member);
@@ -180,16 +190,6 @@ void SymbolicState::prepareForSourceUnit(SourceUnit const& _source)
 }
 
 /// Private helpers.
-
-void SymbolicState::addBalance(smtutil::Expression _address, smtutil::Expression _value)
-{
-	auto newBalances = smtutil::Expression::store(
-		balances(),
-		_address,
-		balance(_address) + move(_value)
-	);
-	m_state.assignMember("balances", newBalances);
-}
 
 void SymbolicState::buildABIFunctions(set<FunctionCall const*> const& _abiFunctions)
 {

@@ -117,6 +117,9 @@ public:
 
 	/// Transfer _value from _from to _to.
 	void transfer(smtutil::Expression _from, smtutil::Expression _to, smtutil::Expression _value);
+
+	/// Adds _value to _account's balance.
+	void addBalance(smtutil::Expression _account, smtutil::Expression _value);
 	//@}
 
 	/// Transaction data.
@@ -163,9 +166,6 @@ public:
 	//@}
 
 private:
-	/// Adds _value to _account's balance.
-	void addBalance(smtutil::Expression _account, smtutil::Expression _value);
-
 	/// Builds m_abi based on the abi.* calls _abiFunctions.
 	void buildABIFunctions(std::set<FunctionCall const*> const& _abiFunctions);
 
